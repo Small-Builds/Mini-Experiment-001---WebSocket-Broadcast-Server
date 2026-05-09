@@ -17,20 +17,21 @@ func main() {
 
 	defer client.Close()
 
-	// Print successful connection.
-	fmt.Println("Successfully connected to the server !")
+	// Building the raw HTTP request.
+	request := "GET/HTTP/1.1\r\n" + 
+	"Host: localhost\r\n" +
+	"Connection: close\r\n" + "\r\n"
 
-	// Defining the message to be sent.
-	message := "Muzan \n"
-
-	// Converting and writing message bytes into TCP stream
-	_, err = client.Write([]byte(message))
+	// Converting it explicitly into byte stream so it stays ordered.
+	requestBytes := []byte(request)
+	
+	// Writing the bytes into TCP stream
+	_, err = client.Write(requestBytes)
 
 	if err != nil {
-		log.Fatalf("Failed to send message: %v", err)
+		log.Fatalf("Write error: %v", err)
+		return
 	}
-
-	// Keeping the connection alive for testing
-	fmt.Scanln()
+	fmt.Println("Request sent successfully.")
 
 }
