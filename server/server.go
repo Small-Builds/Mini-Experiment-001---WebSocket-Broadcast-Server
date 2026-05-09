@@ -2,43 +2,42 @@ package main
 
 import (
 	"fmt"
-	"net"
 	"log"
+	"net"
 )
 
-func main(){
+func main() {
 
 	// TCP Listener
-	listener, error := net.Listen("tcp",":8000")
-	if error != nil {
-		log.Fatalf("Error starting server: %v",error)
+	listener, err := net.Listen("tcp", ":8000")
+	if err != nil {
+		log.Fatalf("err starting server: %v", err)
 	}
 	defer listener.Close()
-	
+
 	fmt.Println("Server running on port 8080")
 
-	// Accepting connections
-	connection, error := listener.Accept()
-	if error != nil{
-		log.Fatalf("Error accepting connection: %v", error)
-	} 
+	// Loop for multiple connections
+
+	for {
+		// Accepting connections
+		connection, err := listener.Accept()
+		if err != nil {
+			log.Fatalf("err accepting connection: %v", err)
+		}
+		go handle(connection)
+	}
+}
+
+func handle(connection net.Conn) {
 	defer connection.Close()
 
-	// Printing established connection's IP.
-	fmt.Println("Connection established from", connection.RemoteAddr())
-
-	// Creating buffer for incoming data
 	buffer := make([]byte, 1024)
-
-	// Read bytes from TCP stream
-	bytesRead, error := connection.Read(buffer)
-	
-	if error != nil{
-		log.Fatalf("Failed to read data: %v",error)
+	for {
+		bytesRead, err := connection.Read(buffer)
+		if err != nil {
+			log.Fatalf("Can't read from stream: %v", err)
+		}
+		fmt.Println(string(buffer[:bytesRead]))
 	}
-
-	// Converting received bytes into string
-	message := string(buffer[:bytesRead])
-
-	fmt.Printf("Received message: %s\n",message)
 }
