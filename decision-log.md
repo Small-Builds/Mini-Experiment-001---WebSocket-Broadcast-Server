@@ -4,7 +4,7 @@
 ---
 
 ## Slice 6: DEC-001 · FSM for protocol change
-**Status:** ⌛ In progress
+**Status:** ✔️ Implemented
 
 ### Context
 Once protocol updation is complete HTTP is never used and both the client and server continue with WebSockets. However we do need to send an HTTP request initially. So in order to manage what protocol is being used, I thought of implementing a FINITE STATE MACHINE, having states as HTTP or WebSocket. Whatever the state the client or the goroutine for that client is in, the requests and responses will be handled accordingly.
@@ -30,7 +30,7 @@ Transition is triggered by--
 ---
 
 ## Slice 6: DEC-002 · Creating structures for client and server.
-**Status:** ⌛ In progress
+**Status:** ✔️ Implemented
 
 ### Context
 Since each client is tackled by different threads/goroutines. Different clients might be at different protocols at any given instance of time. Also, it is equally likely that some clients might never upgrade to a WebSocket protocol and might simply want to continue with HTTP. 

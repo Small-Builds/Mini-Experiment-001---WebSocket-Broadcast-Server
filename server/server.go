@@ -9,7 +9,24 @@ import (
 	"net"
 	"strings"
     "sync"
+    "crypto/rand"
 )
+type FrameState int
+const (
+    READ_FIN_OPCODE      FrameState = iota
+    READ_MASK_LENGTH
+    READ_EXTENDED_LENGTH
+    READ_MASKING_KEY
+    READ_PAYLOAD
+    FRAME_DONE
+)
+
+type WebSocketFrame struct {
+    FIN     bool
+    Opcode  byte
+    Masked  bool
+    Payload []byte
+}
 
 var (
     clients   = make(map[net.Conn]*Client)
@@ -108,6 +125,7 @@ func handleConnection(client *Client) {
 			}
 
 		case StateWebSocket:
+            for{
             buf := make([]byte, 4096)
             n, err := client.Conn.Read(buf)
             if err != nil {
@@ -119,11 +137,14 @@ func handleConnection(client *Client) {
                 log.Println("frame parse error:", err)
                 return
             }
-            log.Printf("Received WebSocket message: %s\n", string(frame.Payload))
+            msg := string(frame.Payload)
+            log.Printf("Received: %s\n", msg)
+            broadcast(client.Conn, msg)
+            
             clientsMu.Lock()
             log.Printf("Total clients connected: %d\n", len(clients))
             clientsMu.Unlock()
-            return
+            }
 		}
 	}
 }
@@ -133,22 +154,6 @@ func computeAcceptKey(secWebSocketKey string) string {
 	h := sha1.New()
 	h.Write([]byte(secWebSocketKey + magicGUID))
 	return base64.StdEncoding.EncodeToString(h.Sum(nil))
-}
-type FrameState int
-const (
-    READ_FIN_OPCODE      FrameState = iota
-    READ_MASK_LENGTH
-    READ_EXTENDED_LENGTH
-    READ_MASKING_KEY
-    READ_PAYLOAD
-    FRAME_DONE
-)
-
-type WebSocketFrame struct {
-    FIN     bool
-    Opcode  byte
-    Masked  bool
-    Payload []byte
 }
 
 func parseFrame(data []byte) (WebSocketFrame, error) {
@@ -237,4 +242,56 @@ func parseFrame(data []byte) (WebSocketFrame, error) {
     }
 
     return frame, nil
+}
+
+func createFrame(payload string) []byte {
+    data := []byte(payload)
+    payloadLen := len(data)
+
+    // Generate 4-byte masking key
+    maskKey := make([]byte, 4)
+    rand.Read(maskKey)
+
+    var frame []byte
+
+    // Byte 0: FIN=1, RSV1-3=0, Opcode=0x1 (text)
+    frame = append(frame, 0x81)
+
+    // Byte 1: MASK=1, Payload length
+    if payloadLen < 126 {
+        frame = append(frame, byte(0x80|payloadLen))
+    } else if payloadLen <= 65535 {
+        frame = append(frame, 0x80|126)
+        frame = append(frame, byte(payloadLen>>8), byte(payloadLen&0xFF))
+    } else {
+        frame = append(frame, 0x80|127)
+        for i := 7; i >= 0; i-- {
+            frame = append(frame, byte(payloadLen>>(i*8)))
+        }
+    }
+
+    // Masking key
+    frame = append(frame, maskKey...)
+
+    // Masked payload
+    for i, b := range data {
+        frame = append(frame, b^maskKey[i%4])
+    }
+
+    return frame
+}
+
+func broadcast(sender net.Conn, message string) {
+    clientsMu.Lock()
+    defer clientsMu.Unlock()
+
+    frame := createFrame(message)
+    for conn, client := range clients {
+        if conn == sender {
+            continue // skip sender
+        }
+        if client.State == StateWebSocket {
+            conn.Write(frame)
+        }
+    }
 }

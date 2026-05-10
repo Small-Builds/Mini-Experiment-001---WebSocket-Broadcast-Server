@@ -12,6 +12,23 @@ import (
     "sync"
 )
 
+type FrameState int
+const (
+    READ_FIN_OPCODE      FrameState = iota
+    READ_MASK_LENGTH
+    READ_EXTENDED_LENGTH
+    READ_MASKING_KEY
+    READ_PAYLOAD
+    FRAME_DONE
+)
+
+type WebSocketFrame struct {
+    FIN     bool
+    Opcode  byte
+    Masked  bool
+    Payload []byte
+}
+
 type ProtocolState int
 const (
 	StateHTTP      ProtocolState = iota
@@ -76,9 +93,109 @@ func runClient(message string) {
                 return
             }
             log.Println("Frame sent:", message)
-            return
+            for {
+                buf := make([]byte, 4096)
+                n, err := client.Conn.Read(buf)
+                if err != nil {
+                    log.Println("connection closed:", err)
+                    return
+                }
+                frame, err := parseFrame(buf[:n])
+                if err != nil {
+                    log.Println("frame parse error:", err)
+                    return
+                }
+                log.Printf("Broadcast received: %s\n", string(frame.Payload))
+            }
         }
     }
+}
+func parseFrame(data []byte) (WebSocketFrame, error) {
+    frame := WebSocketFrame{}
+    state := READ_FIN_OPCODE
+    i := 0
+    var payloadLen int
+    var maskKey [4]byte
+
+    for state != FRAME_DONE {
+        if i >= len(data) {
+            return frame, fmt.Errorf("incomplete frame")
+        }
+
+        switch state {
+        case READ_FIN_OPCODE:
+            frame.FIN = (data[i] & 0x80) != 0
+            frame.Opcode = data[i] & 0x0F
+            i++
+            state = READ_MASK_LENGTH
+
+        case READ_MASK_LENGTH:
+            frame.Masked = (data[i] & 0x80) != 0
+            payloadLen = int(data[i] & 0x7F)
+            i++
+            if payloadLen == 126 {
+                state = READ_EXTENDED_LENGTH
+            } else if payloadLen == 127 {
+                state = READ_EXTENDED_LENGTH
+            } else {
+                if frame.Masked {
+                    state = READ_MASKING_KEY
+                } else {
+                    state = READ_PAYLOAD
+                }
+            }
+
+        case READ_EXTENDED_LENGTH:
+            if payloadLen == 126 {
+                if i+2 > len(data) {
+                    return frame, fmt.Errorf("incomplete extended length")
+                }
+                payloadLen = int(data[i])<<8 | int(data[i+1])
+                i += 2
+            } else {
+                if i+8 > len(data) {
+                    return frame, fmt.Errorf("incomplete extended length")
+                }
+                payloadLen = 0
+                for j := 0; j < 8; j++ {
+                    payloadLen = (payloadLen << 8) | int(data[i+j])
+                }
+                i += 8
+            }
+            if frame.Masked {
+                state = READ_MASKING_KEY
+            } else {
+                state = READ_PAYLOAD
+            }
+
+        case READ_MASKING_KEY:
+            if i+4 > len(data) {
+                return frame, fmt.Errorf("incomplete masking key")
+            }
+            copy(maskKey[:], data[i:i+4])
+            i += 4
+            state = READ_PAYLOAD
+
+        case READ_PAYLOAD:
+            if i+payloadLen > len(data) {
+                return frame, fmt.Errorf("incomplete payload")
+            }
+            raw := data[i : i+payloadLen]
+            if frame.Masked {
+                unmasked := make([]byte, payloadLen)
+                for j := 0; j < payloadLen; j++ {
+                    unmasked[j] = raw[j] ^ maskKey[j%4]
+                }
+                frame.Payload = unmasked
+            } else {
+                frame.Payload = raw
+            }
+            i += payloadLen
+            state = FRAME_DONE
+        }
+    }
+
+    return frame, nil
 }
 
 func sendUpgradeRequest(conn net.Conn, host string) (string, error) {
