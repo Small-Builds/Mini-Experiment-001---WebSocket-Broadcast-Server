@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"strings"
+    "sync"
 )
 
 type ProtocolState int
@@ -23,42 +24,61 @@ type Client struct {
 }
 
 func main() {
-	conn, err := net.Dial("tcp", "localhost:8000")
-	if err != nil {
-		log.Fatalf("Connection failed: %v", err)
-	}
-	defer conn.Close()
+    messages := []string{
+        "Hello from client 1",
+        "Hello from client 2",
+        "Hello from client 3",
+    }
 
-	client := &Client{Conn: conn, State: StateHTTP}
+    var wg sync.WaitGroup
 
-	for {
-		switch client.State {
+    for _, msg := range messages {
+        wg.Add(1)
+        go func(message string) {
+            defer wg.Done()
+            runClient(message)
+        }(msg)
+    }
 
-		case StateHTTP:
-			secWebSocketKey, err := sendUpgradeRequest(client.Conn, "localhost:8000")
-			if err != nil {
-				log.Fatal("Failed to send upgrade request:", err)
-			}
-			fmt.Println("Upgrade request sent...")
+    wg.Wait()
+}
 
-			err = readUpgradeResponse(client.Conn, secWebSocketKey)
-			if err != nil {
-				log.Fatal("Upgrade failed:", err)
-			}
-			client.State = StateWebSocket
-			fmt.Println("Client switched to WebSocket state")
+func runClient(message string) {
+    conn, err := net.Dial("tcp", "localhost:8000")
+    if err != nil {
+        log.Println("Connection failed:", err)
+        return
+    }
+    defer conn.Close()
 
-		case StateWebSocket:
-            message := "Hello this is WebSocket"
+    client := &Client{Conn: conn, State: StateHTTP}
+
+    for {
+        switch client.State {
+        case StateHTTP:
+            secWebSocketKey, err := sendUpgradeRequest(client.Conn, "localhost:8000")
+            if err != nil {
+                log.Println("Failed to send upgrade request:", err)
+                return
+            }
+            err = readUpgradeResponse(client.Conn, secWebSocketKey)
+            if err != nil {
+                log.Println("Upgrade failed:", err)
+                return
+            }
+            client.State = StateWebSocket
+
+        case StateWebSocket:
             frame := createFrame(message)
             _, err := client.Conn.Write(frame)
             if err != nil {
-                log.Fatal("frame write error:", err)
+                log.Println("frame write error:", err)
+                return
             }
             log.Println("Frame sent:", message)
             return
-		}
-	}
+        }
+    }
 }
 
 func sendUpgradeRequest(conn net.Conn, host string) (string, error) {

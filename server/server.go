@@ -8,6 +8,12 @@ import (
 	"log"
 	"net"
 	"strings"
+    "sync"
+)
+
+var (
+    clients   = make(map[net.Conn]*Client)
+    clientsMu sync.Mutex
 )
 
 type ProtocolState int
@@ -42,7 +48,18 @@ func main() {
 }
 
 func handleConnection(client *Client) {
-	defer client.Conn.Close()
+    clientsMu.Lock()
+    clients[client.Conn] = client
+    clientsMu.Unlock()
+    
+    defer func() {
+        clientsMu.Lock()
+        delete(clients, client.Conn)
+        clientsMu.Unlock()
+        client.Conn.Close()
+        log.Printf("Client disconnected. Total connected: %d\n", len(clients))
+    }()
+    defer client.Conn.Close()
 	reader := bufio.NewReader(client.Conn)
 
 	for {
@@ -103,6 +120,9 @@ func handleConnection(client *Client) {
                 return
             }
             log.Printf("Received WebSocket message: %s\n", string(frame.Payload))
+            clientsMu.Lock()
+            log.Printf("Total clients connected: %d\n", len(clients))
+            clientsMu.Unlock()
             return
 		}
 	}
