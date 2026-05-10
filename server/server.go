@@ -1,125 +1,220 @@
-// ==============================================================================
-// IMPORTS AND STRUCTURE DEFINTIONS
-// ==============================================================================
 package main
 
 import (
+	"bufio"
+	"crypto/sha1"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"net"
 	"strings"
-	"bufio"
-	"crypto/sha1"
-	"encoding/base64"
 )
 
-// Defining the states of the FSM parser
-// It's a Go enum, giving meaningful names to states instead of numbers.
-type FSMState int
+type ProtocolState int
 const (
-    READ_REQUEST_LINE FSMState = iota
-    READ_HEADERS
-    READ_BODY
-    DONE
+	StateHTTP      ProtocolState = iota
+	StateWebSocket
 )
 
-// Defining the structure of the HTTP request
-type HTTPRequest struct {
-    RequestLine string
-    Headers     map[string]string
-    Body        string
+type Client struct {
+	Conn  net.Conn
+	State ProtocolState
 }
 
-//==============================================================================
-// MAIN FUNCTION
-//==============================================================================
 func main() {
-
-	// TCP Listener
 	listener, err := net.Listen("tcp", ":8000")
 	if err != nil {
 		log.Fatalf("err starting server: %v", err)
 	}
 	defer listener.Close()
-
-	fmt.Println("Server running on port 8080")
-
-	// Loop for multiple connections
+	fmt.Println("Server running on port 8000")
 
 	for {
-		// Accepting connections
-		connection, err := listener.Accept()
+		conn, err := listener.Accept()
 		if err != nil {
-			log.Fatalf("err accepting connection: %v", err)
+			log.Println("accept error:", err)
+			continue
 		}
-		fmt.Println("Connection established successfully.")
-		go handleConnection(connection)
+		client := &Client{Conn: conn, State: StateHTTP}
+		fmt.Println("Connection established.")
+		go handleConnection(client)
 	}
 }
 
-//==============================================================================
-// Server - Handle Connection and Upgrade
-//==============================================================================
-func handleConnection(conn net.Conn) {
-    reader := bufio.NewReader(conn)
+func handleConnection(client *Client) {
+	defer client.Conn.Close()
+	reader := bufio.NewReader(client.Conn)
 
-    // Read request line
-    requestLine, _ := reader.ReadString('\n')
-    if !strings.HasPrefix(requestLine, "GET ") {
-        log.Println("Not a GET request")
-        return
-    }
+	for {
+		switch client.State {
 
-    // Read headers
-    headers := make(map[string]string)
-    for {
-        line, err := reader.ReadString('\n')
-        if err != nil || line == "\r\n" || line == "\n" {
-            break // end of headers
-        }
+		case StateHTTP:
+			requestLine, _ := reader.ReadString('\n')
+			if !strings.HasPrefix(requestLine, "GET ") {
+				log.Println("Not a GET request")
+				return
+			}
 
-        line = strings.TrimSpace(line)
-        if idx := strings.Index(line, ":"); idx != -1 {
-            key := strings.TrimSpace(line[:idx])
-            value := strings.TrimSpace(line[idx+1:])
-            headers[strings.ToLower(key)] = value
-        }
-    }
+			headers := make(map[string]string)
+			for {
+				line, err := reader.ReadString('\n')
+				if err != nil || line == "\r\n" || line == "\n" {
+					break
+				}
+				line = strings.TrimSpace(line)
+				if idx := strings.Index(line, ":"); idx != -1 {
+					key := strings.TrimSpace(line[:idx])
+					value := strings.TrimSpace(line[idx+1:])
+					headers[strings.ToLower(key)] = value
+				}
+			}
 
-    // Check for WebSocket upgrade
-    if headers["upgrade"] == "websocket" && strings.Contains(headers["connection"], "Upgrade") {
-        secWebSocketKey := headers["sec-websocket-key"]
-        if secWebSocketKey == "" {
-            log.Println("Missing Sec-WebSocket-Key")
+			if headers["upgrade"] == "websocket" {
+				secWebSocketKey := headers["sec-websocket-key"]
+				if secWebSocketKey == "" {
+					log.Println("Missing Sec-WebSocket-Key")
+					return
+				}
+				acceptKey := computeAcceptKey(secWebSocketKey)
+				response := fmt.Sprintf("HTTP/1.1 101 Switching Protocols\r\n"+
+					"Upgrade: websocket\r\n"+
+					"Connection: Upgrade\r\n"+
+					"Sec-WebSocket-Accept: %s\r\n"+
+					"\r\n", acceptKey)
+				_, err := client.Conn.Write([]byte(response))
+				if err != nil {
+					log.Println("Write error:", err)
+					return
+				}
+				client.State = StateWebSocket
+				log.Println("Server switched to WebSocket state")
+			}
+
+		case StateWebSocket:
+            buf := make([]byte, 4096)
+            n, err := client.Conn.Read(buf)
+            if err != nil {
+                log.Println("frame read error:", err)
+                return
+            }
+            frame, err := parseFrame(buf[:n])
+            if err != nil {
+                log.Println("frame parse error:", err)
+                return
+            }
+            log.Printf("Received WebSocket message: %s\n", string(frame.Payload))
             return
-        }
-
-        acceptKey := computeAcceptKey(secWebSocketKey)
-
-        response := fmt.Sprintf("HTTP/1.1 101 Switching Protocols\r\n"+
-            "Upgrade: websocket\r\n"+
-            "Connection: Upgrade\r\n"+
-            "Sec-WebSocket-Accept: %s\r\n"+
-            "\r\n", acceptKey)
-
-        conn.Write([]byte(response))
-
-        _, err := conn.Write([]byte(response))
-        if err != nil {
-            log.Println("Write error:", err)
-            return
-        }
-        log.Println("WebSocket upgrade successful on server")
-
-    }
+		}
+	}
 }
 
-//==============================================================================
-// Accept Key Computation -- Servers's
-//==============================================================================
 func computeAcceptKey(secWebSocketKey string) string {
-    const magicGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-    h := sha1.New()
-    h.Write([]byte(secWebSocketKey + magicGUID))
-    return base64.StdEncoding.EncodeToString(h.Sum(nil))
+	const magicGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+	h := sha1.New()
+	h.Write([]byte(secWebSocketKey + magicGUID))
+	return base64.StdEncoding.EncodeToString(h.Sum(nil))
+}
+type FrameState int
+const (
+    READ_FIN_OPCODE      FrameState = iota
+    READ_MASK_LENGTH
+    READ_EXTENDED_LENGTH
+    READ_MASKING_KEY
+    READ_PAYLOAD
+    FRAME_DONE
+)
+
+type WebSocketFrame struct {
+    FIN     bool
+    Opcode  byte
+    Masked  bool
+    Payload []byte
+}
+
+func parseFrame(data []byte) (WebSocketFrame, error) {
+    frame := WebSocketFrame{}
+    state := READ_FIN_OPCODE
+    i := 0
+    var payloadLen int
+    var maskKey [4]byte
+
+    for state != FRAME_DONE {
+        if i >= len(data) {
+            return frame, fmt.Errorf("incomplete frame")
+        }
+
+        switch state {
+        case READ_FIN_OPCODE:
+            frame.FIN = (data[i] & 0x80) != 0
+            frame.Opcode = data[i] & 0x0F
+            i++
+            state = READ_MASK_LENGTH
+
+        case READ_MASK_LENGTH:
+            frame.Masked = (data[i] & 0x80) != 0
+            payloadLen = int(data[i] & 0x7F)
+            i++
+            if payloadLen == 126 {
+                state = READ_EXTENDED_LENGTH
+            } else if payloadLen == 127 {
+                state = READ_EXTENDED_LENGTH
+            } else {
+                if frame.Masked {
+                    state = READ_MASKING_KEY
+                } else {
+                    state = READ_PAYLOAD
+                }
+            }
+
+        case READ_EXTENDED_LENGTH:
+            if payloadLen == 126 {
+                if i+2 > len(data) {
+                    return frame, fmt.Errorf("incomplete extended length")
+                }
+                payloadLen = int(data[i])<<8 | int(data[i+1])
+                i += 2
+            } else {
+                if i+8 > len(data) {
+                    return frame, fmt.Errorf("incomplete extended length")
+                }
+                payloadLen = 0
+                for j := 0; j < 8; j++ {
+                    payloadLen = (payloadLen << 8) | int(data[i+j])
+                }
+                i += 8
+            }
+            if frame.Masked {
+                state = READ_MASKING_KEY
+            } else {
+                state = READ_PAYLOAD
+            }
+
+        case READ_MASKING_KEY:
+            if i+4 > len(data) {
+                return frame, fmt.Errorf("incomplete masking key")
+            }
+            copy(maskKey[:], data[i:i+4])
+            i += 4
+            state = READ_PAYLOAD
+
+        case READ_PAYLOAD:
+            if i+payloadLen > len(data) {
+                return frame, fmt.Errorf("incomplete payload")
+            }
+            raw := data[i : i+payloadLen]
+            if frame.Masked {
+                unmasked := make([]byte, payloadLen)
+                for j := 0; j < payloadLen; j++ {
+                    unmasked[j] = raw[j] ^ maskKey[j%4]
+                }
+                frame.Payload = unmasked
+            } else {
+                frame.Payload = raw
+            }
+            i += payloadLen
+            state = FRAME_DONE
+        }
+    }
+
+    return frame, nil
 }

@@ -1,147 +1,169 @@
-//==============================================================================
-// IMPORTS
-//==============================================================================
 package main
 
 import (
-	"fmt"
-	"log"
-	"net"
 	"bufio"
 	"crypto/rand"
 	"crypto/sha1"
 	"encoding/base64"
+	"fmt"
+	"log"
+	"net"
 	"strings"
 )
 
-//==============================================================================
-// MAIN FUNCTION
-//==============================================================================
-func main() {
+type ProtocolState int
+const (
+	StateHTTP      ProtocolState = iota
+	StateWebSocket
+)
 
-	// Connect to TCP server
-	client, err := net.Dial("tcp", "localhost:8000")
+type Client struct {
+	Conn  net.Conn
+	State ProtocolState
+}
+
+func main() {
+	conn, err := net.Dial("tcp", "localhost:8000")
 	if err != nil {
 		log.Fatalf("Connection failed: %v", err)
 	}
-	defer client.Close()
+	defer conn.Close()
 
-	// Calling the upgradeRequest Function
-	secWebSocketKey, err := sendUpgradeRequest(client, "localhost:8080")
-    if err != nil {
-        log.Fatal("Failed to send upgrade request:", err)
-    }
-	fmt.Println("Upgrade request sent...")
+	client := &Client{Conn: conn, State: StateHTTP}
 
-	// Calling the readUpgradeResponse function
-	err = readUpgradeResponse(client, secWebSocketKey)
-    if err != nil {
-        log.Fatal("Upgrade failed:", err)
-    }
+	for {
+		switch client.State {
 
-    fmt.Println("WebSocket handshake completed successfully!")
+		case StateHTTP:
+			secWebSocketKey, err := sendUpgradeRequest(client.Conn, "localhost:8000")
+			if err != nil {
+				log.Fatal("Failed to send upgrade request:", err)
+			}
+			fmt.Println("Upgrade request sent...")
 
-	// Building the raw HTTP request.
-	request := "GET/HTTP/1.1\r\n" + 
-	"Host: localhost\r\n" +
-	"Connection: close\r\n" + "\r\n"
+			err = readUpgradeResponse(client.Conn, secWebSocketKey)
+			if err != nil {
+				log.Fatal("Upgrade failed:", err)
+			}
+			client.State = StateWebSocket
+			fmt.Println("Client switched to WebSocket state")
 
-	// Converting it explicitly into byte stream so it stays ordered.
-	requestBytes := []byte(request)
-	
-	// Writing the bytes into TCP stream
-	_, err = client.Write(requestBytes)
-
-	if err != nil {
-		log.Fatalf("Write error: %v", err)
-		return
+		case StateWebSocket:
+            message := "Hello this is WebSocket"
+            frame := createFrame(message)
+            _, err := client.Conn.Write(frame)
+            if err != nil {
+                log.Fatal("frame write error:", err)
+            }
+            log.Println("Frame sent:", message)
+            return
+		}
 	}
-	fmt.Println("Request sent successfully.")
-
 }
 
-//==============================================================================
-// UPGRADE REQUEST FUNCTION
-//==============================================================================
 func sendUpgradeRequest(conn net.Conn, host string) (string, error) {
-    // 1. Generate random 16 bytes and base64 encode
-    key := make([]byte, 16)
-    _, err := rand.Read(key)
-    if err != nil {
-        return "", err
-    }
-    secWebSocketKey := base64.StdEncoding.EncodeToString(key)
+	key := make([]byte, 16)
+	_, err := rand.Read(key)
+	if err != nil {
+		return "", err
+	}
+	secWebSocketKey := base64.StdEncoding.EncodeToString(key)
 
-    // 2. Build HTTP Upgrade Request
-    req := fmt.Sprintf("GET /chat HTTP/1.1\r\n"+
-        "Host: %s\r\n"+
-        "Upgrade: websocket\r\n"+
-        "Connection: Upgrade\r\n"+
-        "Sec-WebSocket-Key: %s\r\n"+
-        "Sec-WebSocket-Version: 13\r\n"+
-        "\r\n",
-        host, secWebSocketKey)
+	req := fmt.Sprintf("GET /chat HTTP/1.1\r\n"+
+		"Host: %s\r\n"+
+		"Upgrade: websocket\r\n"+
+		"Connection: Upgrade\r\n"+
+		"Sec-WebSocket-Key: %s\r\n"+
+		"Sec-WebSocket-Version: 13\r\n"+
+		"\r\n",
+		host, secWebSocketKey)
 
-    // 3. Send to server
-    _, err = conn.Write([]byte(req))
-    if err != nil {
-        return "", err
-    }
-
-    // Return the key so we can compute expected accept key later
-    return secWebSocketKey, nil
+	_, err = conn.Write([]byte(req))
+	if err != nil {
+		return "", err
+	}
+	return secWebSocketKey, nil
 }
 
-//==============================================================================
-// Client - Read and Verify Response
-//==============================================================================
 func readUpgradeResponse(conn net.Conn, secWebSocketKey string) error {
-    reader := bufio.NewReader(conn)
+	reader := bufio.NewReader(conn)
 
-    // Read status line
-    statusLine, err := reader.ReadString('\n')
-    if err != nil {
-        return fmt.Errorf("Failed to read status line: %s", statusLine)
-    }
+	statusLine, err := reader.ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("failed to read status line: %w", err)
+	}
+	if !strings.Contains(statusLine, "101") {
+		return fmt.Errorf("unexpected status: %s", statusLine)
+	}
 
-    // Read headers
-    headers := make(map[string]string)
-    for {
-        line, err := reader.ReadString('\n')
-        if err != nil || line == "\r\n" || line == "\n" {
-            break
-        }
+	headers := make(map[string]string)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil || line == "\r\n" || line == "\n" {
+			break
+		}
+		line = strings.TrimSpace(line)
+		if idx := strings.Index(line, ":"); idx != -1 {
+			key := strings.TrimSpace(line[:idx])
+			value := strings.TrimSpace(line[idx+1:])
+			headers[strings.ToLower(key)] = value
+		}
+	}
 
-        line = strings.TrimSpace(line)
-        if idx := strings.Index(line, ":"); idx != -1 {
-            key := strings.TrimSpace(line[:idx])
-            value := strings.TrimSpace(line[idx+1:])
-            headers[strings.ToLower(key)] = value
-        }
-    }
+	serverAcceptKey := headers["sec-websocket-accept"]
+	if serverAcceptKey == "" {
+		return fmt.Errorf("missing Sec-WebSocket-Accept")
+	}
 
-    serverAcceptKey := headers["sec-websocket-accept"]
-    if serverAcceptKey == "" {
-        return fmt.Errorf("missing Sec-WebSocket-Accept")
-    }
+	expected := computeAcceptKey(secWebSocketKey)
+	if serverAcceptKey != expected {
+		return fmt.Errorf("Sec-WebSocket-Accept mismatch")
+	}
 
-    expected := computeAcceptKey(secWebSocketKey)
-
-    if serverAcceptKey != expected {
-        return fmt.Errorf("Sec-WebSocket-Accept mismatch")
-    }
-
-    log.Println("WebSocket upgrade successful on client")
-
-    return nil
+	log.Println("WebSocket upgrade successful on client")
+	return nil
 }
 
-//==============================================================================
-// Accept Key Computation -- Client's
-//==============================================================================
 func computeAcceptKey(secWebSocketKey string) string {
-    const magicGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-    h := sha1.New()
-    h.Write([]byte(secWebSocketKey + magicGUID))
-    return base64.StdEncoding.EncodeToString(h.Sum(nil))
+	const magicGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+	h := sha1.New()
+	h.Write([]byte(secWebSocketKey + magicGUID))
+	return base64.StdEncoding.EncodeToString(h.Sum(nil))
+}
+
+func createFrame(payload string) []byte {
+    data := []byte(payload)
+    payloadLen := len(data)
+
+    // Generate 4-byte masking key
+    maskKey := make([]byte, 4)
+    rand.Read(maskKey)
+
+    var frame []byte
+
+    // Byte 0: FIN=1, RSV1-3=0, Opcode=0x1 (text)
+    frame = append(frame, 0x81)
+
+    // Byte 1: MASK=1, Payload length
+    if payloadLen < 126 {
+        frame = append(frame, byte(0x80|payloadLen))
+    } else if payloadLen <= 65535 {
+        frame = append(frame, 0x80|126)
+        frame = append(frame, byte(payloadLen>>8), byte(payloadLen&0xFF))
+    } else {
+        frame = append(frame, 0x80|127)
+        for i := 7; i >= 0; i-- {
+            frame = append(frame, byte(payloadLen>>(i*8)))
+        }
+    }
+
+    // Masking key
+    frame = append(frame, maskKey...)
+
+    // Masked payload
+    for i, b := range data {
+        frame = append(frame, b^maskKey[i%4])
+    }
+
+    return frame
 }
